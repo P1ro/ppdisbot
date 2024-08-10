@@ -12,6 +12,8 @@ from collections import deque
 import time
 from yt_dlp.utils import DownloadError
 
+from discord.ui import Button, View
+
 # Setup logging to a file
 logging.basicConfig(filename='/tmp/pyppdisbot.log', level=logging.INFO)
 
@@ -41,6 +43,19 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 
 intents = discord.Intents.default()
 intents.message_content = True
+
+async def progress_bar(voice_client, total_duration):
+    length = 30  # Length of the progress bar
+    while voice_client.is_playing():
+        current_time = voice_client.timestamp.total_seconds()
+        progress = int((current_time / total_duration) * length)
+        bar = "█" * progress + "-" * (length - progress)
+        progress_message = f"Progress: [{bar}] {int(current_time)}s / {int(total_duration)}s"
+        
+        # Assuming you store the message ID of the playback message
+        await playback_message.edit(content=progress_message)
+        
+        await asyncio.sleep(5)  # Update every 5 seconds
 
 async def load_playlist(playlist_url):
     ydl_opts = {'extract_flat': 'in_playlist'}  # Use the flat extraction for speed
@@ -175,9 +190,7 @@ async def custom_help_command(ctx):
 
 @bot.command(name='play', help="Play a song or a playlist from a YouTube URL.")
 async def play(ctx, url=None):
-    await bot.change_presence(status=discord.Status.online, activity=discord.Game("Loading music..."))
-    
-    global current_track
+    global current_track, playback_message
 
     if url:
         try:
@@ -190,20 +203,17 @@ async def play(ctx, url=None):
         except Exception as e:
             await ctx.send(f"An error occurred: {str(e)}")
             logging.error(f"Error adding track to queue: {str(e)}")
-            await bot.change_presence(status=discord.Status.idle, activity=discord.Game("Idle"))
             return
 
     if not queue:
         await ctx.send("The queue is empty.")
-        await bot.change_presence(status=discord.Status.idle, activity=discord.Game("Idle"))
         return
-
+    
     if not ctx.voice_client:
         if ctx.author.voice:
             await ctx.author.voice.channel.connect()
         else:
             await ctx.send("You are not connected to a voice channel.")
-            await bot.change_presence(status=discord.Status.idle, activity=discord.Game("Idle"))
             return
 
     if ctx.voice_client.is_playing():
@@ -216,29 +226,32 @@ async def play(ctx, url=None):
         info = await extract_info_with_retries(ytdl_instance, current_track)
         if not info:
             await ctx.send("No information could be retrieved from the URL.")
-            await bot.change_presence(status=discord.Status.idle, activity=discord.Game("Idle"))
             return
 
         audio_url = info['url']
+        total_duration = info['duration']  # Total duration of the song in seconds
+
         ctx.voice_client.play(discord.FFmpegPCMAudio(audio_url), after=lambda e: bot.loop.create_task(check_queue(ctx)))
 
-        await update_status(info['title'])  # Update the bot's status with the current song title
-
         buttons = [
-            discord.ui.Button(label="⏮️ Previous", custom_id="prev", style=discord.ButtonStyle.secondary),
-            discord.ui.Button(label="⏯️ Play/Pause", custom_id="pause_resume", style=discord.ButtonStyle.primary),
-            discord.ui.Button(label="⏭️ Next", custom_id="next", style=discord.ButtonStyle.secondary)
+            Button(label="⏮️ Previous", custom_id="prev", style=discord.ButtonStyle.secondary),
+            Button(label="⏯️ Play/Pause", custom_id="pause_resume", style=discord.ButtonStyle.primary),
+            Button(label="⏭️ Next", custom_id="next", style=discord.ButtonStyle.secondary)
         ]
-        view = discord.ui.View()
+        view = View()
         for button in buttons:
             view.add_item(button)
 
-        await ctx.send(f"Now playing: {info['title']}", view=view)
+        # Send the playback controls message and save its reference for updating
+        playback_message = await ctx.send(f"Now playing: {info['title']}", view=view)
+        
+        # Start the progress bar update
+        bot.loop.create_task(progress_bar(ctx.voice_client, total_duration))
     except Exception as e:
         await ctx.send(f"An error occurred: {str(e)}")
         logging.error(f"Playback error: {str(e)}")
-        await bot.change_presence(status=discord.Status.idle, activity=discord.Game("Idle"))
 
+        
 async def check_queue(ctx):
     if queue:
         next_track = queue.popleft()
