@@ -131,6 +131,7 @@ async def play(ctx, url):
         # Play the audio using FFmpeg
         voice_client.play(discord.FFmpegPCMAudio(audio_url), after=lambda e: print(f"Error: {e}") if e else None)
         await ctx.send(f"Now playing: {info['title']}")
+        await ctx.send(f"HEEEEEEEEEEEEEEEEEY")
     except Exception as e:
         await ctx.send(f"An error occurred: {str(e)}")
 
