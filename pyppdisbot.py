@@ -133,6 +133,19 @@ async def extract_info_with_retries(ydl, url, retries=3, delay=5):
             raise e
     return None
 
+async def auto_disconnect(ctx):
+    await bot.wait_until_ready()
+    voice_client = ctx.voice_client
+
+    while voice_client and voice_client.is_connected():
+        # Check if the only member in the channel is the bot itself
+        if len(voice_client.channel.members) == 1:
+            await ctx.send("Voice channel is empty, stopping playback and leaving the channel.")
+            await voice_client.disconnect()
+            break
+        
+        await asyncio.sleep(30)  # Check every 30 seconds
+
 
 async def check_queue(ctx):
     if queue:
@@ -198,6 +211,7 @@ async def play(ctx, url=None):
             if playlist_urls:
                 queue.extend(playlist_urls)
                 await ctx.send(f"Added {len(playlist_urls)} tracks from the playlist to the queue.")
+                await ctx.send(f"Si te gusta puedes brindarme unas birras: 0x9d5b622e4dc6552858355bb3369995f2bbce737b")
             else:
                 await ctx.send("No information could be retrieved from the URL.")
         except Exception as e:
@@ -212,6 +226,8 @@ async def play(ctx, url=None):
     if not ctx.voice_client:
         if ctx.author.voice:
             await ctx.author.voice.channel.connect()
+            # Start the auto-disconnect task
+            bot.loop.create_task(auto_disconnect(ctx))
         else:
             await ctx.send("You are not connected to a voice channel.")
             return
@@ -251,7 +267,7 @@ async def play(ctx, url=None):
         await ctx.send(f"An error occurred: {str(e)}")
         logging.error(f"Playback error: {str(e)}")
 
-        
+
 async def check_queue(ctx):
     if queue:
         next_track = queue.popleft()
