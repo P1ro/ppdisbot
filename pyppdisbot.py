@@ -1,9 +1,36 @@
+from docopt import docopt
+import os
+import sys
+import daemon
+import daemon.pidfile  # Import pidfile directly
+from dotenv import load_dotenv
 import discord
 from discord.ext import commands
-import yt_dlp as ytdl  # Use yt_dlp as ytdl
-import os
-from dotenv import load_dotenv
+import yt_dlp as ytdl
+import logging
 
+# Setup logging to a file
+logging.basicConfig(filename='/tmp/pyppdisbot.log', level=logging.INFO)
+
+# Define the usage pattern
+doc = """
+My Discord Bot.
+
+Usage:
+  pyppdisbot.py [--daemon]
+  pyppdisbot.py (-h | --help)
+  pyppdisbot.py --version
+
+Options:
+  -h --help     Show this screen.
+  --version     Show version.
+  --daemon      Run the bot in the background as a daemon.
+"""
+
+# Parse the command-line arguments
+args = docopt(doc, version='PP Discord Bot 1.0')
+
+PID_FILE = '/tmp/pyppdisbot.pid'
 # Load environment variables from .env file
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -36,7 +63,7 @@ ffmpeg_options = {
     'options': '-vn'
 }
 
-ytdl_instance = ytdl.YoutubeDL(ytdl_format_options)  # Correctly create the YoutubeDL instance here
+ytdl_instance = ytdl.YoutubeDL(ytdl_format_options)
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -125,4 +152,18 @@ async def stop(ctx):
     await voice_client.disconnect()
     await ctx.send("Stopped playing and disconnected from the voice channel.")
 
-bot.run(TOKEN)
+# Function to run the bot
+def run_bot():
+    bot.run(TOKEN)
+
+# Run in daemon mode if the --daemon option is specified
+if args['--daemon']:
+    # Set up the DaemonContext with the PID file
+    pidfile = daemon.pidfile.PIDLockFile(PID_FILE)
+    with daemon.DaemonContext(pidfile=pidfile):
+        # The PID should be available now that the context is set up
+        pid = os.getpid()  # Get the current process PID
+        logging.info(f"Bot running in daemon mode with PID: {pid}")
+        run_bot()  # Start the bot after logging the PID
+else:
+    run_bot()
