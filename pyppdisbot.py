@@ -1,3 +1,4 @@
+import json
 from docopt import docopt
 import os
 import daemon
@@ -11,7 +12,6 @@ import asyncio
 from collections import deque
 import time
 from yt_dlp.utils import DownloadError
-
 from discord.ui import Button, View
 
 # Setup logging to a file
@@ -44,6 +44,31 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 intents = discord.Intents.default()
 intents.message_content = True
 
+# Configuration file for allowed and excluded channels
+CONFIG_FILE = "bot_config.json"
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as file:
+            return json.load(file)
+    else:
+        return {"allowed_channels": [], "excluded_channels": []}
+
+def save_config(config):
+    with open(CONFIG_FILE, 'w') as file:
+        json.dump(config, file, indent=4)
+
+bot_config = load_config()
+
+def get_allowed_channels():
+    return bot_config.get("allowed_channels", [])
+
+def get_excluded_channels():
+    return bot_config.get("excluded_channels", [])
+
+def is_channel_excluded(channel_id):
+    return channel_id in get_excluded_channels()
+
 async def progress_bar(voice_client, total_duration):
     length = 30  # Length of the progress bar
     while voice_client.is_playing():
@@ -52,7 +77,6 @@ async def progress_bar(voice_client, total_duration):
         bar = "█" * progress + "-" * (length - progress)
         progress_message = f"Progress: [{bar}] {int(current_time)}s / {int(total_duration)}s"
         
-        # Assuming you store the message ID of the playback message
         await playback_message.edit(content=progress_message)
         
         await asyncio.sleep(5)  # Update every 5 seconds
@@ -64,7 +88,6 @@ async def load_playlist(playlist_url):
         if info and 'entries' in info:
             return [entry['url'] for entry in info['entries']]
         return []
-
 
 def get_prefix(bot, message):
     prefixes = ['&', '!']  # List of prefixes the bot should recognize
@@ -146,7 +169,6 @@ async def auto_disconnect(ctx):
         
         await asyncio.sleep(30)  # Check every 30 seconds
 
-
 async def check_queue(ctx):
     if queue:
         next_track = queue.popleft()
@@ -166,6 +188,7 @@ async def disconnect_after_inactivity():
             await vc.disconnect()
             logging.info(f"Bot disconnected from {vc.channel} due to inactivity")
 
+@bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
     await bot.change_presence(status=discord.Status.idle, activity=discord.Game("Idle"))
@@ -175,8 +198,18 @@ async def on_command_completion(ctx):
     if not ctx.voice_client or not ctx.voice_client.is_playing():
         await bot.change_presence(status=discord.Status.idle, activity=discord.Game("Idle"))
 
+@bot.event
+async def on_message(message):
+    if is_channel_excluded(message.channel.id):
+        return  # Ignore messages in excluded channels
+    await bot.process_commands(message)
+
 @bot.command(name='join')
 async def join(ctx):
+    if is_channel_excluded(ctx.channel.id):
+        await ctx.send("This channel is excluded from bot interaction.")
+        return
+
     if not ctx.message.author.voice:
         await ctx.send("{} is not connected to a voice channel".format(ctx.message.author.name))
         return
@@ -186,6 +219,10 @@ async def join(ctx):
 
 @bot.command(name='leave')
 async def leave(ctx):
+    if is_channel_excluded(ctx.channel.id):
+        await ctx.send("This channel is excluded from bot interaction.")
+        return
+
     voice_client = ctx.message.guild.voice_client
     if voice_client.is_connected():
         await voice_client.disconnect()
@@ -197,12 +234,24 @@ bot.remove_command('help')
 
 @bot.command(name='help', help="Shows this message.")
 async def custom_help_command(ctx):
+    if is_channel_excluded(ctx.channel.id):
+        await ctx.send("This channel is excluded from bot interaction.")
+        return
+
     help_message = """Your custom help text here..."""
     await ctx.send(help_message)
     await bot.change_presence(status=discord.Status.online, activity=discord.Game("Assisting users with commands"))
 
 @bot.command(name='play', help="Play a song or a playlist from a YouTube URL.")
 async def play(ctx, url=None):
+    if ctx.channel.id not in get_allowed_channels():
+        await ctx.send("This command cannot be used in this channel.")
+        return
+    
+    if is_channel_excluded(ctx.channel.id):
+        await ctx.send("This channel is excluded from bot interaction.")
+        return
+
     global current_track, playback_message
 
     if url:
@@ -211,7 +260,6 @@ async def play(ctx, url=None):
             if playlist_urls:
                 queue.extend(playlist_urls)
                 await ctx.send(f"Added {len(playlist_urls)} tracks from the playlist to the queue.")
-                await ctx.send(f"Si te gusta puedes brindarme unas birras: 0x9d5b622e4dc6552858355bb3369995f2bbce737b")
             else:
                 await ctx.send("No information could be retrieved from the URL.")
         except Exception as e:
@@ -267,140 +315,49 @@ async def play(ctx, url=None):
         await ctx.send(f"An error occurred: {str(e)}")
         logging.error(f"Playback error: {str(e)}")
 
-
-async def check_queue(ctx):
-    if queue:
-        next_track = queue.popleft()
-        try:
-            info = await extract_info_with_retries(ytdl_instance, next_track)
-            audio_url = info['url']
-            ctx.voice_client.play(discord.FFmpegPCMAudio(audio_url), after=lambda e: bot.loop.create_task(check_queue(ctx)))
-            await update_status(info['title'])  # Update the bot's status with the next song title
-            await ctx.send(f"Now playing: {info['title']}")
-        except Exception as e:
-            await ctx.send(f"An error occurred: {str(e)}")
-            logging.error(f"Playback error: {str(e)}")
-            await bot.change_presence(status=discord.Status.idle, activity=discord.Game("Idle"))
-    else:
-        await bot.change_presence(status=discord.Status.idle, activity=discord.Game("Queue is empty"))
-        await ctx.send("The queue is empty. Playback has ended.")
-
-@bot.command(name='stop')
-async def stop(ctx):
-    voice_client = ctx.message.guild.voice_client
-    if not voice_client or not voice_client.is_connected():
-        await ctx.send("The bot is not connected to any voice channel.")
+@bot.command(name='configurebot', help="Configure the bot's allowed/excluded channels. Use: &configurebot add/remove/exclude/unexclude #channel")
+@commands.has_permissions(administrator=True)
+async def configure_bot(ctx, action: str = None, channel: discord.TextChannel = None):
+    if not action or not channel:
+        await ctx.send("Missing arguments. Use `&configurebot add/remove/exclude/unexclude #channel`.")
         return
 
-    if voice_client.is_playing():
-        voice_client.stop()
-    
-    await ctx.send("Stopped playing.")
+    channel_id = channel.id
 
-@bot.command(name='next')
-async def next(ctx):
-    voice_client = ctx.message.guild.voice_client
-    if voice_client and voice_client.is_playing():
-        voice_client.stop()
-        await play(ctx)
+    if action.lower() == "add":
+        if channel_id not in bot_config["allowed_channels"]:
+            bot_config["allowed_channels"].append(channel_id)
+            save_config(bot_config)
+            await ctx.send(f"Channel {channel.mention} has been added to the allowed list.")
+        else:
+            await ctx.send(f"Channel {channel.mention} is already in the allowed list.")
+    
+    elif action.lower() == "remove":
+        if channel_id in bot_config["allowed_channels"]:
+            bot_config["allowed_channels"].remove(channel_id)
+            save_config(bot_config)
+            await ctx.send(f"Channel {channel.mention} has been removed from the allowed list.")
+        else:
+            await ctx.send(f"Channel {channel.mention} is not in the allowed list.")
+    
+    elif action.lower() == "exclude":
+        if channel_id not in bot_config["excluded_channels"]:
+            bot_config["excluded_channels"].append(channel_id)
+            save_config(bot_config)
+            await ctx.send(f"Channel {channel.mention} has been excluded from bot interaction.")
+        else:
+            await ctx.send(f"Channel {channel.mention} is already excluded.")
+    
+    elif action.lower() == "unexclude":
+        if channel_id in bot_config["excluded_channels"]:
+            bot_config["excluded_channels"].remove(channel_id)
+            save_config(bot_config)
+            await ctx.send(f"Channel {channel.mention} has been unexcluded from bot interaction.")
+        else:
+            await ctx.send(f"Channel {channel.mention} is not in the excluded list.")
+    
     else:
-        await ctx.send("Not currently playing anything.")
-
-@bot.command(name='prev')
-async def prev(ctx):
-    global current_track
-
-    if current_track:
-        queue.appendleft(current_track)
-        voice_client = ctx.message.guild.voice_client
-        if voice_client and voice_client.is_playing():
-            voice_client.stop()
-        await play(ctx)
-    else:
-        await ctx.send("No previous track.")
-
-# Interaction callback for buttons
-@bot.event
-async def on_interaction(interaction):
-    voice_client = interaction.guild.voice_client
-    
-    if interaction.data['custom_id'] == 'pause_resume':
-        if voice_client.is_paused():
-            voice_client.resume()
-            await interaction.response.send_message('Resumed playback', ephemeral=True)
-        elif voice_client.is_playing():
-            voice_client.pause()
-            await interaction.response.send_message('Paused playback', ephemeral=True)
-    
-    elif interaction.data['custom_id'] == 'next':
-        if voice_client is not None and voice_client.is_playing():
-            voice_client.stop()
-            # Call the play command but handle it as an interaction
-            await handle_play_interaction(interaction)
-    
-    elif interaction.data['custom_id'] == 'prev':
-        await handle_play_interaction(interaction)
-
-async def handle_play_interaction(interaction):
-    global current_track
-
-    if not queue:
-        await interaction.response.send_message("The queue is empty.", ephemeral=True)
-        return
-
-    current_track = queue.popleft()
-    voice_client = interaction.guild.voice_client
-
-    if voice_client is None:
-        channel = interaction.user.voice.channel
-        voice_client = await channel.connect()
-    elif voice_client.channel != interaction.user.voice.channel:
-        await voice_client.move_to(interaction.user.voice.channel)
-
-    try:
-        # Acknowledge the interaction immediately to avoid timeout
-        await interaction.response.defer()
-
-        info = await extract_info_with_retries(ytdl_instance, current_track)
-        if not info:
-            await interaction.followup.send("No information could be retrieved from the URL.", ephemeral=True)
-            return
-
-        audio_url = info['url']
-        voice_client.play(discord.FFmpegPCMAudio(audio_url), after=lambda e: bot.loop.create_task(check_queue(interaction)))
-
-        buttons = [
-            discord.ui.Button(label="⏮️ Previous", custom_id="prev", style=discord.ButtonStyle.secondary),
-            discord.ui.Button(label="⏯️ Play/Pause", custom_id="pause_resume", style=discord.ButtonStyle.primary),
-            discord.ui.Button(label="⏭️ Next", custom_id="next", style=discord.ButtonStyle.secondary)
-        ]
-        view = discord.ui.View()
-        for button in buttons:
-            view.add_item(button)
-
-        # Send the final response after processing
-        await interaction.followup.send(f"Now playing: {info['title']}", view=view)
-    except Exception as e:
-        await interaction.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
-        logging.error(f"Playback error: {str(e)}")
-
-@bot.command(name='queue', help="Display the current queue.")
-async def show_queue(ctx):
-    if not queue:
-        await ctx.send("The queue is empty.")
-        return
-    
-    queue_list = list(queue)  # Convert deque to list
-
-    # Iterate through each item in the queue and send it
-    for index, url in enumerate(queue_list, start=1):
-        await ctx.send(f"{index}. {url}")
-
-    # If there are more than 10 items, inform the user
-    if len(queue_list) > 10:
-        await ctx.send(f"...and {len(queue_list) - 10} more items in the queue.")
-
-
+        await ctx.send("Invalid action. Use `add`, `remove`, `exclude`, or `unexclude`.")
 
 # Function to run the bot
 def run_bot():
