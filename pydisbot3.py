@@ -33,10 +33,10 @@ ALLOWED_CHANNELS = [1271957559732862977]
 ALLOWED_USER_IDS = [275385318574915585]
 
 # Timeout for auto-disconnection (seconds)
-DISCONNECT_TIMEOUT = 120  # 5 minutes
+DISCONNECT_TIMEOUT = 120  # 2 minutes
 
 # Maximum number of songs to fetch from a playlist
-MAX_PLAYLIST_ITEMS = 10
+MAX_PLAYLIST_ITEMS = 100
 
 # Restrict the bot to specific channels and users
 async def check_channel(interaction):
@@ -75,60 +75,81 @@ async def play_audio(voice_client, stream_url):
     except Exception as e:
         logging.error(f"Error playing audio: {str(e)}")
 
-# Fetch stream URL(s) and metadata from YouTube using yt_dlp, running in parallel
-# Modify the fetch_stream_urls function to use parallel fetching for playlist entries
-async def fetch_stream_urls(url):
+# Detect whether the URL is a playlist or a single video
+async def detect_playlist(url):
     ydl_opts = {
-        'format': 'bestaudio',
         'quiet': True,
-        'noplaylist': False
+        'extract_flat': True,
     }
 
     def _extract(url):
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return info
+            return ydl.extract_info(url, download=False, process=False)
+
+    try:
+        info = await asyncio.to_thread(_extract, url)
+        is_playlist = 'entries' in info
+        return is_playlist
+    except Exception as e:
+        logging.error(f"Error detecting playlist: {str(e)}")
+        return False
+
+# Fetch the direct stream URL for a single song
+async def fetch_single_stream_url(url):
+    ydl_opts = {
+        'format': 'bestaudio',
+        'quiet': True,
+    }
+
+    def _extract(url):
+        with YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    try:
+        logging.info(f"Extracting stream URL for song: {url}")
+        info = await asyncio.to_thread(_extract, url)
+        return {
+            'url': info['url'],
+            'title': info.get('title', 'Unknown'),
+            'uploader': info.get('uploader', 'Unknown'),
+            'duration': info.get('duration', 0),
+            'views': info.get('view_count', 'Unknown'),
+            'upload_date': info.get('upload_date', 'Unknown'),
+        }
+    except Exception as e:
+        logging.error(f"Error fetching stream URL: {str(e)}")
+        return None
+
+# Fetch stream URL(s) and metadata using yt_dlp
+async def fetch_stream_urls(url):
+    is_playlist = await detect_playlist(url)
+    ydl_opts = {
+        'format': 'bestaudio',
+        'quiet': True,
+    }
+
+    if is_playlist:
+        ydl_opts['extract_flat'] = 'in_playlist'
+
+    def _extract(url):
+        with YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
 
     try:
         logging.info(f"Extracting metadata for URL: {url}")
         info = await asyncio.to_thread(_extract, url)
 
-        # Check if the URL is a playlist or a single video
         if 'entries' in info:
-            # Playlist case: Fetch detailed metadata in parallel for each song
-            logging.info(f"Playlist detected, processing entries.")
-            
-            # Define a coroutine to fetch metadata for each song
-            async def fetch_song_metadata(entry):
-                logging.info(f"Fetching metadata for song: {entry['title']}")
-                song_metadata = {
-                    'url': entry['url'],
-                    'title': entry.get('title', 'Unknown'),
-                    'uploader': entry.get('uploader', 'Unknown'),
-                    'duration': entry.get('duration', 0),
-                    'views': entry.get('view_count', 'Unknown'),
-                    'upload_date': entry.get('upload_date', 'Unknown'),
-                }
-                return song_metadata
-            
-            # Create coroutines for each song metadata fetching task
-            tasks = [fetch_song_metadata(entry) for entry in info['entries'][:MAX_PLAYLIST_ITEMS]]
-
-            # Run tasks concurrently and gather the results
-            song_data = await asyncio.gather(*tasks)
-
+            # Playlist case: Fetch direct stream URL for each song
+            song_data = []
+            for entry in info['entries'][:MAX_PLAYLIST_ITEMS]:
+                song_metadata = await fetch_single_stream_url(f"https://www.youtube.com/watch?v={entry['id']}")
+                if song_metadata:
+                    song_data.append(song_metadata)
             return song_data, True
         else:
-            # Single video case
-            metadata = {
-                'url': info['url'],
-                'title': info.get('title', 'Unknown'),
-                'uploader': info.get('uploader', 'Unknown'),
-                'duration': info.get('duration', 0),
-                'views': info.get('view_count', 'Unknown'),
-                'upload_date': info.get('upload_date', 'Unknown'),
-            }
-            logging.info(f"Single song fetched: {metadata['title']} by {metadata['uploader']}")
+            # Single video case: Extract metadata directly
+            metadata = await fetch_single_stream_url(url)
             return [metadata], False
 
     except Exception as e:
@@ -148,15 +169,13 @@ async def play_next_song(voice_client):
         await play_audio(voice_client, current_song['url'])
     else:
         logging.info("Queue is empty, switching presence back to /help.")
-        # If queue is empty, set presence back to /help and start idle timeout countdown
         await bot.change_presence(activity=discord.Game(name="/help"))
         await check_and_disconnect(voice_client)
 
 # Disconnect the bot if idle or alone
 async def check_and_disconnect(voice_client):
-    await asyncio.sleep(5)  # Give it a small delay to handle immediate disconnection
+    await asyncio.sleep(5)
     if not voice_client.is_playing() and len(voice_client.channel.members) == 1:
-        # Wait for a defined timeout period before disconnecting
         await asyncio.sleep(DISCONNECT_TIMEOUT)
         if not voice_client.is_playing() and len(voice_client.channel.members) == 1:
             logging.info("Bot disconnected due to inactivity or being alone.")
@@ -181,7 +200,7 @@ async def play(interaction: discord.Interaction, url: str):
         await queue.put(song_metadata)
         metadata_queue.append(song_metadata)
         logging.info(f"Added song to queue: {song_metadata['title']} by {song_metadata['uploader']}")
-    
+
     # Notify user
     if is_playlist:
         await interaction.followup.send(f"Added {len(songs)} songs from the playlist to the queue.", ephemeral=True)
