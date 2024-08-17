@@ -22,6 +22,6 @@ def load_playlist(playlist_url):
         return []
 
 # Example usage:
-playlist_url = "https://www.youtube.com/watch?v=uLIs0j2WnlM&list=RDEMC8fzeVShZE57exsbYjFEsg&start_radio=1"
+playlist_url = "https://www.youtube.com/watch?v=PhidpMS6Tdw"
 urls = load_playlist(playlist_url)
 print(urls)  # Should print the list of video URLs from the playlist
